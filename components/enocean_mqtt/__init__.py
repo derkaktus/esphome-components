@@ -64,3 +64,11 @@ async def to_code(config):
             device[CONF_DEVICE_NAME],
             device[CONF_DEVICE_EEP]
         ))
+
+    # Include-Pfad für Unterordner
+    cg.add_build_flag("-Isrc/esphome/components/enocean_mqtt")
+
+    # Alle cpp-Dateien aus Unterordnern registrieren
+    cg.add_platformio_option("build_src_filter", [
+        "+<esphome/components/enocean_mqtt/eep/>",
+    ])

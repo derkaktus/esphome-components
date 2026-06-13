@@ -4,9 +4,9 @@
 #include "esphome/components/mqtt/mqtt_client.h"
 #include "esphome/components/uart/uart.h"
 
-#include "enocean_uart.h"
-#include "enocean_known_devices.h"
-#include "eep/eep_registry.h"
+#include "esphome/components/enocean_mqtt/enocean_uart.h"
+#include "esphome/components/enocean_mqtt/enocean_known_devices.h"
+#include "esphome/components/enocean_mqtt/eep/eep_registry.h"
 
 #include <string>
 #include <vector>
