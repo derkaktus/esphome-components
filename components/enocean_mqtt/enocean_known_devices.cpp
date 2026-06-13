@@ -1,4 +1,4 @@
-#include "enocean_known_devices.h"
+#include "esphome/components/enocean_mqtt/enocean_known_devices.h"
 #include "esphome/core/log.h"
 
 namespace esphome {

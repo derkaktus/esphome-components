@@ -1,4 +1,4 @@
-#include "enocean_uart.h"
+#include "esphome/components/enocean_mqtt/enocean_uart.h"
 #include "esphome/core/log.h"
 #include <cstdio>
 

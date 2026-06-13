@@ -1,5 +1,5 @@
-#include "enocean_mqtt.h"
-#include "eep/eep_registry.h"
+#include "esphome/components/enocean_mqtt/enocean_mqtt.h"
+#include "esphome/components/enocean_mqtt/eep/eep_registry.h"
 #include "esphome/core/log.h"
 
 namespace esphome {
