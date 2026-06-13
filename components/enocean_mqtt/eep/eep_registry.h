@@ -1,5 +1,5 @@
 #pragma once
-#include "eep_base.h"
+#include "esphome/components/enocean_mqtt/eep/eep_base.h"
 #include <map>
 #include <memory>
 #include <vector>

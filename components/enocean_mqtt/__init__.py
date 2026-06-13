@@ -6,20 +6,19 @@ from esphome.const import CONF_ID
 DEPENDENCIES = ["mqtt", "uart"]
 AUTO_LOAD  = ["mqtt", "uart"]
 
-CONF_MQTT_ID      = "mqtt_id"
-CONF_UART_ID      = "uart_id"
-CONF_MAIN_TOPIC   = "main_topic"
-CONF_DEBUG_RAW    = "debug_raw"
+CONF_MQTT_ID       = "mqtt_id"
+CONF_MAIN_TOPIC    = "main_topic"
+CONF_DEBUG_RAW     = "debug_raw"
 CONF_KNOWN_DEVICES = "known_devices"
+CONF_DEVICE_ID     = "device_id"
+CONF_DEVICE_NAME   = "name"
+CONF_DEVICE_EEP    = "eep"
 
-CONF_DEVICE_ID    = "device_id"
-CONF_DEVICE_NAME  = "name"
-CONF_DEVICE_EEP   = "eep"
-
-enocean_mqtt_ns   = cg.esphome_ns.namespace("enocean_mqtt")
+enocean_mqtt_ns      = cg.esphome_ns.namespace("enocean_mqtt")
 EnoceanMqttComponent = enocean_mqtt_ns.class_(
     "EnoceanMqttComponent",
-    cg.Component
+    cg.Component,
+    uart.UARTDevice        # ← wichtig!
 )
 
 KNOWN_DEVICE_SCHEMA = cv.Schema({
@@ -29,16 +28,15 @@ KNOWN_DEVICE_SCHEMA = cv.Schema({
 })
 
 CONFIG_SCHEMA = cv.Schema({
-    cv.GenerateID():                        cv.declare_id(EnoceanMqttComponent),
-    cv.Required(CONF_MQTT_ID):              cv.use_id(mqtt.MQTTClientComponent),
-    cv.Required(CONF_UART_ID):              cv.use_id(uart.UARTComponent),
+    cv.GenerateID():                    cv.declare_id(EnoceanMqttComponent),
+    cv.Required(CONF_MQTT_ID):          cv.use_id(mqtt.MQTTClientComponent),
     cv.Optional(CONF_MAIN_TOPIC,
-                default="enocean"):         cv.string,
+                default="enocean"):     cv.string,
     cv.Optional(CONF_DEBUG_RAW,
-                default=True):              cv.boolean,
+                default=True):          cv.boolean,
     cv.Optional(CONF_KNOWN_DEVICES,
-                default=[]):                cv.ensure_list(KNOWN_DEVICE_SCHEMA),
-}).extend(cv.COMPONENT_SCHEMA)
+                default=[]):            cv.ensure_list(KNOWN_DEVICE_SCHEMA),
+}).extend(cv.COMPONENT_SCHEMA).extend(uart.UART_DEVICE_SCHEMA)  # ← wichtig!
 
 
 async def to_code(config):
@@ -50,8 +48,7 @@ async def to_code(config):
     cg.add(var.set_mqtt(mqtt_client))
 
     # UART
-    uart_bus = await cg.get_variable(config[CONF_UART_ID])
-    cg.add(var.set_uart(uart_bus))
+    await uart.register_uart_device(var, config)  # ← wichtig!
 
     # Optionen
     cg.add(var.set_main_topic(config[CONF_MAIN_TOPIC]))
@@ -64,11 +61,3 @@ async def to_code(config):
             device[CONF_DEVICE_NAME],
             device[CONF_DEVICE_EEP]
         ))
-
-    # Include-Pfad für Unterordner
-    cg.add_build_flag("-Isrc/esphome/components/enocean_mqtt")
-
-    # Alle cpp-Dateien aus Unterordnern registrieren
-    cg.add_platformio_option("build_src_filter", [
-        "+<esphome/components/enocean_mqtt/eep/>",
-    ])
