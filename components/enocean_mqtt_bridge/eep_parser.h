@@ -1,23 +1,25 @@
 #pragma once
-#include <string>
+
 #include <vector>
-#include <map>
+#include <string>
 
 namespace esphome {
 namespace enocean_mqtt_bridge {
 
-// Struktur für die extrahierten MQTT-Daten
-struct MqttData {
-    std::string topic_suffix;
-    std::string payload; // oder JSON format
+// Hilfsstruktur für die geparsten Daten
+struct ParsedMessage {
+    std::string topic_suffix; // z.B. "temperature" oder "window_handle"
+    std::string payload;      // z.B. "22.5" oder "\"closed\""
 };
 
 class EepParser {
 public:
     virtual ~EepParser() = default;
-    // Nimmt die reinen EnOcean-Datenbytes und gibt eine Liste von MQTT-Nachrichten zurück
-    virtual std::vector<MqttData> parse(const std::vector<uint8_t>& data) = 0;
+    
+    // Nimmt die reinen Daten-Bytes (Payload) des EnOcean-Datagramms entgegen
+    // und gibt eine Liste von MQTT-Nachrichten zurück
+    virtual std::vector<ParsedMessage> parse(const std::vector<uint8_t>& data) = 0;
 };
 
-} // namespace
-} // namespace
+} // namespace enocean_mqtt_bridge
+} // namespace esphome
