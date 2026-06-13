@@ -4,9 +4,9 @@
 #include "esphome/components/mqtt/mqtt_client.h"
 #include "esphome/components/uart/uart.h"
 
-#include "esphome/components/enocean_mqtt/enocean_uart.h"
-#include "esphome/components/enocean_mqtt/enocean_known_devices.h"
-#include "esphome/components/enocean_mqtt/eep/eep_registry.h"
+#include "enocean_uart.h"
+#include "enocean_known_devices.h"
+#include "eep_registry.h"
 
 #include <string>
 #include <vector>
@@ -19,14 +19,12 @@ class EnoceanMqttComponent
     , public uart::UARTDevice {
 public:
 
-    // ── ESPHome Lifecycle ─────────────────────────────────────
     void setup()   override;
     void loop()    override;
     float get_setup_priority() const override {
         return setup_priority::AFTER_WIFI;
     }
 
-    // ── Setter (aus __init__.py) ──────────────────────────────
     void set_mqtt(mqtt::MQTTClientComponent* mqtt)  { this->mqtt_     = mqtt;  }
     void set_uart(uart::UARTComponent* uart)        { this->set_uart_parent(uart); }
     void set_main_topic(const std::string& topic)  { this->main_topic_ = topic; }
@@ -40,20 +38,15 @@ public:
 
 private:
 
-    // ── Abhängigkeiten ────────────────────────────────────────
     mqtt::MQTTClientComponent* mqtt_     {nullptr};
 
-    // ── Konfiguration ─────────────────────────────────────────
     std::string main_topic_ {"enocean"};
     bool        debug_raw_  {true};
 
-    // ── Known Devices ─────────────────────────────────────────
     KnownDeviceStore known_devices_;
 
-    // ── UART Parser ───────────────────────────────────────────
     EnoceanUartParser uart_parser_;
 
-    // ── Interne Methoden ──────────────────────────────────────
     void handle_telegram(const EnoceanTelegram& telegram);
 
     void dispatch_eep(

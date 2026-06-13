@@ -1,4 +1,7 @@
 #pragma once
+
+// TODO: copy content here, includes already updated to flat structure
+
 #include <string>
 #include <vector>
 
@@ -13,20 +16,17 @@ struct KnownDevice {
 
 class KnownDeviceStore {
 public:
+    KnownDeviceStore() = default;
 
-    void add(
-        const std::string& id,
-        const std::string& name,
-        const std::string& eep
-    );
-
-    bool remove(const std::string& id);
+    void add(const std::string& id, const std::string& name, const std::string& eep);
 
     const KnownDevice* find(const std::string& id) const;
 
-    std::vector<KnownDevice> all() const { return devices_; }
+    bool remove(const std::string& id);
 
-    int count() const { return (int)devices_.size(); }
+    std::vector<KnownDevice> all() const;
+
+    size_t count() const { return devices_.size(); }
 
 private:
     std::vector<KnownDevice> devices_;

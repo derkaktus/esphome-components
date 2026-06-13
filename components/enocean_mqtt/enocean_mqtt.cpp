@@ -1,15 +1,11 @@
-#include "esphome/components/enocean_mqtt/enocean_mqtt.h"
-#include "esphome/components/enocean_mqtt/eep/eep_registry.h"
+#include "enocean_mqtt.h"
+#include "eep_registry.h"
 #include "esphome/core/log.h"
 
 namespace esphome {
 namespace enocean_mqtt {
 
 static const char* TAG = "enocean_mqtt";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Setup
-// ─────────────────────────────────────────────────────────────────────────────
 
 void EnoceanMqttComponent::setup() {
 
@@ -18,15 +14,11 @@ void EnoceanMqttComponent::setup() {
     ESP_LOGI(TAG, "  Debug Raw  : %s", debug_raw_ ? "yes" : "no");
     ESP_LOGI(TAG, "  Known Devs : %d", known_devices_.count());
 
-    // Alle EEP Parser registrieren
     register_all_eeps();
 
     ESP_LOGI(TAG, "  EEPs loaded: %d",
         (int)EepRegistry::instance().known_eeps().size());
 
-    // MQTT Command Subscription
-    // Geräte via MQTT hinzufügen / entfernen
-    // Topic: <main_topic>/cmd/#
     if (this->mqtt_ != nullptr) {
 
         std::string cmd_topic = main_topic_ + "/cmd/#";
@@ -36,39 +28,28 @@ void EnoceanMqttComponent::setup() {
             [this](const std::string& topic, const std::string& payload) {
                 this->handle_mqtt_command(topic, payload);
             },
-            0 // QoS
+            0
         );
 
         ESP_LOGI(TAG, "  Subscribed: %s", cmd_topic.c_str());
 
-        // Online Status publizieren
         mqtt_publish(main_topic_ + "/status", "online", true);
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Loop
-// ─────────────────────────────────────────────────────────────────────────────
-
 void EnoceanMqttComponent::loop() {
 
-    // UART Bytes einlesen
     while (available()) {
         uint8_t byte;
         read_byte(&byte);
         uart_parser_.feed(byte);
     }
 
-    // Vollständige Telegramme verarbeiten
     while (uart_parser_.has_telegram()) {
         auto telegram = uart_parser_.pop_telegram();
         handle_telegram(telegram);
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Known Device hinzufügen
-// ─────────────────────────────────────────────────────────────────────────────
 
 void EnoceanMqttComponent::add_known_device(
     const std::string& id,
@@ -80,10 +61,6 @@ void EnoceanMqttComponent::add_known_device(
         id.c_str(), name.c_str(), eep.c_str());
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Telegramm verarbeiten
-// ─────────────────────────────────────────────────────────────────────────────
-
 void EnoceanMqttComponent::handle_telegram(const EnoceanTelegram& telegram) {
 
     const std::string& device_id = telegram.sender_id;
@@ -93,35 +70,25 @@ void EnoceanMqttComponent::handle_telegram(const EnoceanTelegram& telegram) {
         telegram.rorg,
         telegram.data_len);
 
-    // Debug Raw publizieren
     if (debug_raw_) {
         publish_debug_raw(telegram);
     }
 
-    // Known Device suchen
     const KnownDevice* device = known_devices_.find(device_id);
 
-    // Gerätemetadaten publizieren (Name, EEP)
     publish_device_meta(device_id, device);
 
-    // EEP bestimmen
     std::string eep_str;
     if (device != nullptr) {
         eep_str = device->eep;
     } else {
-        // Unbekanntes Gerät: nur Raw Debug, kein EEP Parsing
         ESP_LOGW(TAG, "Unknown device: %s - no EEP parsing",
             device_id.c_str());
         return;
     }
 
-    // EEP dispatchen
     dispatch_eep(eep_str, device_id, telegram.data, telegram.data_len);
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// EEP dispatchen
-// ─────────────────────────────────────────────────────────────────────────────
 
 void EnoceanMqttComponent::dispatch_eep(
     const std::string& eep,
@@ -131,7 +98,6 @@ void EnoceanMqttComponent::dispatch_eep(
 ) {
     std::string base = device_topic(device_id);
 
-    // Parser aus Registry holen
     EepBase* parser = EepRegistry::instance().get(eep);
 
     if (parser == nullptr) {
@@ -141,7 +107,6 @@ void EnoceanMqttComponent::dispatch_eep(
         return;
     }
 
-    // Teach-In prüfen
     if (parser->is_teachin(data, data_len)) {
         ESP_LOGI(TAG, "Teach-In from: %s  EEP: %s",
             device_id.c_str(), eep.c_str());
@@ -149,10 +114,8 @@ void EnoceanMqttComponent::dispatch_eep(
         return;
     }
 
-    // Parse ausführen
     auto messages = parser->parse(data, data_len, base);
 
-    // Alle MQTT Messages publizieren
     for (const auto& msg : messages) {
         mqtt_publish(msg.subtopic, msg.payload);
     }
@@ -163,10 +126,6 @@ void EnoceanMqttComponent::dispatch_eep(
         eep.c_str());
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Gerätemetadaten publizieren
-// ─────────────────────────────────────────────────────────────────────────────
-
 void EnoceanMqttComponent::publish_device_meta(
     const std::string&  device_id,
     const KnownDevice*  device
@@ -174,23 +133,16 @@ void EnoceanMqttComponent::publish_device_meta(
     std::string base = device_topic(device_id);
 
     if (device != nullptr) {
-        // Bekanntes Gerät: Name + EEP publizieren (retained)
         mqtt_publish(base + "/name", device->name, true);
         mqtt_publish(base + "/eep",  device->eep,  true);
     } else {
-        // Unbekanntes Gerät: Marker publizieren
         mqtt_publish(base + "/name", "(unknown)", true);
         mqtt_publish(base + "/eep",  "(unknown)", true);
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Debug Raw publizieren
-// ─────────────────────────────────────────────────────────────────────────────
-
 void EnoceanMqttComponent::publish_debug_raw(const EnoceanTelegram& telegram) {
 
-    // Raw Hex String aufbauen
     char buf[256] = {0};
     int  pos = 0;
 
@@ -211,28 +163,17 @@ void EnoceanMqttComponent::publish_debug_raw(const EnoceanTelegram& telegram) {
     mqtt_publish(main_topic_ + "/debug/raw", std::string(buf));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MQTT Command Handler
-// ─────────────────────────────────────────────────────────────────────────────
-
 void EnoceanMqttComponent::handle_mqtt_command(
     const std::string& topic,
     const std::string& payload
 ) {
-    // Erwartete Topics:
-    //   <main_topic>/cmd/add    → payload: "AABBCCDD,Mein Gerät,A5-02-05"
-    //   <main_topic>/cmd/remove → payload: "AABBCCDD"
-    //   <main_topic>/cmd/list   → payload: (beliebig) → antwortet auf /devices
-
     std::string prefix = main_topic_ + "/cmd/";
 
     if (topic.find(prefix) != 0) return;
 
     std::string cmd = topic.substr(prefix.size());
 
-    // ── ADD ──────────────────────────────────────────────────
     if (cmd == "add") {
-        // Format: "DEVICE_ID,Name,EEP"
         std::vector<std::string> parts;
         std::string tmp = payload;
         size_t pos = 0;
@@ -241,14 +182,13 @@ void EnoceanMqttComponent::handle_mqtt_command(
             parts.push_back(tmp.substr(0, pos));
             tmp.erase(0, pos + 1);
         }
-        parts.push_back(tmp); // letztes Element
+        parts.push_back(tmp);
 
         if (parts.size() >= 3) {
             std::string id   = parts[0];
             std::string name = parts[1];
             std::string eep  = parts[2];
 
-            // Whitespace trimmen
             auto trim = [](std::string& s) {
                 while (!s.empty() && (s.front() == ' ' || s.front() == '\r'))
                     s.erase(s.begin());
@@ -271,10 +211,8 @@ void EnoceanMqttComponent::handle_mqtt_command(
         }
     }
 
-    // ── REMOVE ───────────────────────────────────────────────
     else if (cmd == "remove") {
         std::string id = payload;
-        // Whitespace trimmen
         while (!id.empty() && (id.back() == ' ' || id.back() == '\r'))
             id.pop_back();
 
@@ -290,7 +228,6 @@ void EnoceanMqttComponent::handle_mqtt_command(
         }
     }
 
-    // ── LIST ─────────────────────────────────────────────────
     else if (cmd == "list") {
         auto all = known_devices_.all();
         std::string json = "[";
@@ -311,10 +248,6 @@ void EnoceanMqttComponent::handle_mqtt_command(
         ESP_LOGW(TAG, "CMD unknown: %s", cmd.c_str());
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MQTT Publish Helper
-// ─────────────────────────────────────────────────────────────────────────────
 
 void EnoceanMqttComponent::mqtt_publish(
     const std::string& topic,
