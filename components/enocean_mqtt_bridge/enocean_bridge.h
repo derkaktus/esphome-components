@@ -5,7 +5,9 @@
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/mqtt/mqtt_client.h"
 #include "eep_parser.h"
-#include "eep_A5_02_05.h" // Fügen Sie hier weitere EEPs hinzu
+// Fügen Sie hier weitere EEPs hinzu
+#include "eep_A5_02_05.h"
+#include "eep_F6_10_00.h"
 
 #include <map>
 #include <vector>
@@ -72,7 +74,12 @@ public:
         if (eep == "A5-02-05") {
             dev.parser = std::make_shared<EepA50205>();
         } 
-        
+        else if (eep == "F6-10-00") { 
+            dev.parser = std::make_shared<EepF61000>();
+        }
+        else {
+            ESP_LOGW("enocean", "Warnung: Kein Parser fuer EEP %s definiert!", eep.c_str());
+        }
         known_devices_[device_id] = dev;
     }
 
