@@ -35,6 +35,29 @@ Das Component fungiert als **Bridge** zwischen der EnOcean-Welt und dem MQTT-bas
 - ** TCM300**
 - ** TCM310**
 
+## MQTT Topic Aufbau
+    enocean/
+    ├── status ← "online" (retained)
+    ├── debug/
+    │ └── raw ← JSON mit rohen Telegrammdaten
+    ├── devices ← JSON Liste aller known devices (cmd list)
+    ├── cmd/
+    │      ├── add ← payload: "ID,Name,EEP"
+    │      ├── remove ← payload: "ID"
+     |       ├── list ← payload: beliebig
+     |       └── result ← Antwort auf Commands 
+    └── AABB1122/ ← Pro Gerät 
+             ├── name ← "Fensterkontakt Wohnzimmer" (retained) ├── eep ← "D5-00-01" (retained)
+             ├── state ← Hauptzustand (JSON) 
+             ├── teach_in ← "true" bei Teach-In Telegramm 
+             ├── eep_error ← falls kein Parser vorhanden 
+             └── [eep-spezifisch]
+                        ├── temperature 
+                        ├── humidity 
+                        ├── co2 
+                        ├── valve_position 
+                        └── ...
+
 
 ## Beispielkonfiguration
 
