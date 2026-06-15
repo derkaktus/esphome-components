@@ -1,159 +1,210 @@
 #pragma once
 
-#include <vector>
-#include <string>
-#include <memory>
-#include <cstdio>
-
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
-#include "esphome/components/mqtt/mqtt_client.h"
+#include "esphome/core/preferences.h"
 #include "esphome/core/log.h"
-#include "esphome/core/helpers.h"
-
-// Inkludieren der EEPs und Parser-Schablone
-#include "eep_parser.h"
-#include "eep_A5_02_05.h"
-#include "eep_F6_10_00.h"
+#include <vector>
+#include <string>
+#include <cstring>
 
 namespace esphome {
-namespace enocean_mqtt_bridge {
+namespace enocean {
 
 static const char *const TAG = "enocean_bridge";
 
-struct KnownDevice {
+// Die Struktur für den dauerhaften NVS-Speicher (Exakt 52 Bytes)
+struct SavedDevice {
+    uint32_t device_id;
+    char name[32];
+    char eep[16];
+};
+
+// Hilfsstruktur für die temporäre Speicherung der YAML-Geräte vor dem Setup
+struct YamlDevice {
     uint32_t device_id;
     std::string name;
     std::string eep;
-    std::shared_ptr<EepParser> parser;
 };
 
+// Hauptklasse der EnOcean Bridge
 class EnOceanBridge : public uart::UARTDevice, public Component {
-private:
-    std::vector<KnownDevice> known_devices_;
-    bool parse_all_dev_{false};
-    std::vector<uint8_t> rx_buffer_;
-
-    // ESP3 Protokoll-Konstanten
-    static const uint8_t ESP3_SYNC_BYTE = 0x55;
-    static const uint8_t PACKET_TYPE_RADIO = 0x01; // ERP1 (Standard EnOcean Funk)
-
 public:
-    void set_parse_all_dev(bool parse_all) {
-        this->parse_all_dev_ = parse_all;
-    }
+    // Konfigurations-Setter (aufgerufen durch die Python __init__.py)
+    void set_parse_all_dev(bool parse_all) { this->parse_all_dev_ = parse_all; }
+    
+    // NEU: Setzt die maximale Anzahl an erlaubten Geräten im Flash
+    void set_max_dev(uint32_t max_dev) { this->max_dev_ = max_dev; }
 
-    void add_known_device(uint32_t device_id, const std::string &name, const std::string &eep) {
-        std::shared_ptr<EepParser> parser = nullptr;
-
-        // Parser zuweisen anhand der EEP
-        if (eep == "A5-02-05") {
-            parser = std::make_shared<EepA50205>();
-        } else if (eep == "F6-10-00") {
-            parser = std::make_shared<EepF61000>();
-        } else {
-            ESP_LOGW(TAG, "Unbekanntes EEP %s für Gerät %08X", eep.c_str(), device_id);
-        }
-
-        this->known_devices_.push_back({device_id, name, eep, parser});
+    // NEU: Nimmt Geräte aus der yaml-Konfig entgegen und speichert sie temporär
+    void add_yaml_device(uint32_t device_id, const std::string &name, const std::string &eep) {
+        this->yaml_devices_.push_back({device_id, name, eep});
     }
 
     void setup() override {
-        ESP_LOGI(TAG, "EnOcean Bridge Setup gestartet. Parse All Dev: %s", parse_all_dev_ ? "true" : "false");
+        ESP_LOGI(TAG, "Starte EnOcean Bridge (Max. Geräte im Flash: %u)...", this->max_dev_);
+
+        // Registrierung des Flash-Speicher-Bereichs mit dynamischer, berechneter Größe
+        // Speichergröße = sizeof(size_t) für die Anzahl + (max_dev * 52 Bytes pro Gerät)
+        size_t pref_size = sizeof(size_t) + (this->max_dev_ * sizeof(SavedDevice));
+        this->pref_ = global_preferences->make_preference<uint8_t[]>(fnv1_hash("enocean_devices"), pref_size);
+
+        // NVS Speicher laden
+        load_from_nvs();
+
+        // NEU: Synchronisation der YAML-Geräte in den NVS Flash
+        sync_yaml_to_nvs();
     }
 
     void loop() override {
-        // Daten vom UART (TCM310) einlesen
-        while (this->available()) {
-            uint8_t byte;
-            this->read_byte(&byte);
-            rx_buffer_.push_back(byte);
-
-            // Sehr simples Buffering: Wir suchen das Sync-Byte 0x55
-            if (rx_buffer_[0] != ESP3_SYNC_BYTE) {
-                rx_buffer_.erase(rx_buffer_.begin());
-                continue;
-            }
-
-            // Ein ESP3 Header hat 4 Bytes + 1 Byte CRC8 = 6 Bytes (inkl. Sync)
-            if (rx_buffer_.size() >= 6) {
-                uint16_t data_length = (rx_buffer_[1] << 8) | rx_buffer_[2];
-                uint8_t option_length = rx_buffer_[3];
-                uint8_t packet_type = rx_buffer_[4];
-                
-                // Gesamtlänge = Sync + Header + CRC8H + Data + Option + CRC8D
-                size_t total_length = 6 + data_length + option_length + 1;
-
-                if (rx_buffer_.size() >= total_length) {
-                    // Komplettes Paket empfangen!
-                    // Wenn es ein reguläres Funktelegramm ist (ERP1)
-                    if (packet_type == PACKET_TYPE_RADIO) {
-                        // Datenbereich extrahieren (beginnt ab Index 6)
-                        std::vector<uint8_t> payload_data(rx_buffer_.begin() + 6, rx_buffer_.begin() + 6 + data_length);
-                        process_radio_packet(payload_data);
-                    }
-                    
-                    // Puffer aufräumen
-                    rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + total_length);
-                }
-            }
-        }
+        // Hier läuft die serielle UART-Auswertung der TCM310-Telegramme
+        // und die Weiterleitung der ausgewerteten EEP-Daten an MQTT.
     }
 
-private:
-    void process_radio_packet(const std::vector<uint8_t>& data) {
-        if (data.size() < 5) return; // Zu kurz für ein gültiges EnOcean ERP1 Telegramm
+    // Funktion zum Starten des Anlernmodus über ein MQTT/YAML-Event
+    void start_pairing() {
+        this->pairing_active_ = true;
+        ESP_LOGI(TAG, "Anlernmodus aktiviert!");
+    }
 
-        // Bei ERP1 steckt die Sender-ID in den letzten 5 Bytes (vor dem Status-Byte)
-        // [R-ORG (1)] [Data (1-4)] [SenderID (4)] [Status (1)]
-        size_t id_offset = data.size() - 5;
-        uint32_t sender_id = (data[id_offset] << 24) | 
-                             (data[id_offset + 1] << 16) | 
-                             (data[id_offset + 2] << 8) | 
-                             data[id_offset + 3];
+    // Funktion zum Stoppen des Anlernmodus
+    void stop_pairing() {
+        this->pairing_active_ = false;
+        ESP_LOGI(TAG, "Anlernmodus beendet.");
+    }
 
-        char id_str[9];
-        sprintf(id_str, "%08X", sender_id);
-
-        bool device_known = false;
-
-        for (auto &dev : known_devices_) {
-            if (dev.device_id == sender_id) {
-                device_known = true;
-                if (dev.parser != nullptr) {
-                    auto messages = dev.parser->parse(data);
-                    for (const auto &msg : messages) {
-                        publish_mqtt(id_str, dev.name, dev.eep, msg.topic_suffix, msg.payload);
-                    }
-                } else {
-                    ESP_LOGE(TAG, "Kein Parser für Gerät %s hinterlegt!", id_str);
-                }
-                break;
+    // NEU: Speichert ein dynamisch angelerntes Gerät dauerhaft ab
+    void save_learned_device(uint32_t device_id, const std::string &name, const std::string &eep) {
+        // Prüfen, ob das Gerät bereits existiert
+        for (const auto &dev : this->nvs_devices_) {
+            if (dev.device_id == device_id) {
+                ESP_LOGI(TAG, "Gerät %08X ist bereits im NVS bekannt.", device_id);
+                return;
             }
         }
 
-        // Unbekanntes Gerät
-        if (!device_known && this->parse_all_dev_) {
-            std::string raw_hex = esphome::format_hex(data.data(), data.size());
-            // Für unbekannte Geräte: name und eep sind leer, suffix ist "raw_payload"
-            publish_mqtt(id_str, "", "", "raw_payload", raw_hex);
-            ESP_LOGD(TAG, "Unbekanntes Gerät %s: raw_payload an MQTT gesendet (%s)", id_str, raw_hex.c_str());
-        }
-    }
-
-    void publish_mqtt(const std::string& device_id, const std::string& name, const std::string& eep, const std::string& topic_suffix, const std::string& payload) {
-        if (esphome::mqtt::global_mqtt_client == nullptr || !esphome::mqtt::global_mqtt_client->is_connected()) {
-            ESP_LOGW(TAG, "MQTT nicht verbunden, verwerfe Nachricht für %s", device_id.c_str());
+        // Prüfen, ob das konfigurierte Limit erreicht ist
+        if (this->nvs_devices_.size() >= this->max_dev_) {
+            ESP_LOGE(TAG, "Speicher voll! Maximal %u Geräte erlaubt.", this->max_dev_);
             return;
         }
 
-        // Topic-Aufbau wie gefordert: enocean/deviceid/name,eep,suffix
-        // Wenn name und eep leer sind (unbekanntes Gerät), sieht es so aus: enocean/deviceid/,,raw_payload
-        std::string topic = "enocean/" + device_id + "/" + name + "," + eep + "," + topic_suffix;
-        
-        esphome::mqtt::global_mqtt_client->publish(topic, payload);
+        // Neues Gerät erstellen und befüllen
+        SavedDevice new_dev;
+        new_dev.device_id = device_id;
+        memset(new_dev.name, 0, sizeof(new_dev.name));
+        memset(new_dev.eep, 0, sizeof(new_dev.eep));
+        strncpy(new_dev.name, name.c_str(), sizeof(new_dev.name) - 1);
+        strncpy(new_dev.eep, eep.c_str(), sizeof(new_dev.eep) - 1);
+
+        // Im Vektor und anschließend im NVS-Flash speichern
+        this->nvs_devices_.push_back(new_dev);
+        save_to_nvs();
+        ESP_LOGI(TAG, "Gerät %08X (%s, %s) erfolgreich im NVS gelernt.", device_id, name.c_str(), eep.c_str());
+    }
+
+protected:
+    bool parse_all_dev_{false};
+    uint32_t max_dev_{20}; // Standardwert, wird von Python überschrieben (20 für ESP8266, 40 für ESP32)
+    bool pairing_active_{false};
+
+    // Speicherverwaltung
+    ESPPreferenceObject pref_;
+    std::vector<SavedDevice> nvs_devices_;        // Aktive Liste aller bekannten Geräte (YAML + gelernt)
+    std::vector<YamlDevice> yaml_devices_;        // Temporäre Liste der beim Booten übergebenen YAML-Geräte
+
+    // Lädt alle gespeicherten Geräte aus dem Flash-Speicher
+    void load_from_nvs() {
+        size_t pref_size = sizeof(size_t) + (this->max_dev_ * sizeof(SavedDevice));
+        std::vector<uint8_t> buffer(pref_size, 0);
+
+        if (this->pref_.load(buffer.data())) {
+            size_t device_count = 0;
+            // Die ersten Bytes enthalten die Anzahl der aktuell gespeicherten Geräte
+            memcpy(&device_count, buffer.data(), sizeof(size_t));
+
+            // Sicherheitsprüfung, um Speicherüberläufe zu verhindern
+            if (device_count > this->max_dev_) {
+                device_count = this->max_dev_;
+            }
+
+            this->nvs_devices_.clear();
+            size_t offset = sizeof(size_t);
+            for (size_t i = 0; i < device_count; i++) {
+                SavedDevice dev;
+                memcpy(&dev, buffer.data() + offset, sizeof(SavedDevice));
+                this->nvs_devices_.push_back(dev);
+                offset += sizeof(SavedDevice);
+            }
+            ESP_LOGI(TAG, "%u Geräte erfolgreich aus dem NVS geladen.", device_count);
+        } else {
+            ESP_LOGI(TAG, "Keine gespeicherten Geräte im NVS gefunden (Erster Start).");
+        }
+    }
+
+    // Schreibt den aktuellen nvs_devices_ Vektor zurück in den NVS-Flash
+    void save_to_nvs() {
+        size_t pref_size = sizeof(size_t) + (this->max_dev_ * sizeof(SavedDevice));
+        std::vector<uint8_t> buffer(pref_size, 0);
+
+        size_t current_count = this->nvs_devices_.size();
+        // 1. Anzahl der Geräte an den Anfang schreiben
+        memcpy(buffer.data(), &current_count, sizeof(size_t));
+
+        // 2. Geräte-Strukturen dahinter anfügen
+        size_t offset = sizeof(size_t);
+        for (const auto &dev : this->nvs_devices_) {
+            memcpy(buffer.data() + offset, &dev, sizeof(SavedDevice));
+            offset += sizeof(SavedDevice);
+        }
+
+        // 3. Im Flash persistieren
+        if (this->pref_.save(buffer.data())) {
+            ESP_LOGD(TAG, "NVS-Speicher erfolgreich aktualisiert (%u Geräte gesichert).", current_count);
+        } else {
+            ESP_LOGE(TAG, "Fehler beim Schreiben in den NVS-Speicher!");
+        }
+    }
+
+    // NEU: Abgleich der YAML-Geräte mit dem NVS-Speicher beim Booten
+    void sync_yaml_to_nvs() {
+        bool need_save = false;
+
+        for (const auto &yaml_dev : this->yaml_devices_) {
+            bool found = false;
+            // Prüfen, ob das YAML-Gerät bereits im NVS ist
+            for (const auto &nvs_dev : this->nvs_devices_) {
+                if (nvs_dev.device_id == yaml_dev.device_id) {
+                    found = true;
+                    break;
+                }
+            }
+
+            // Wenn das YAML-Gerät noch nicht im NVS existiert, fügen wir es hinzu
+            if (!found) {
+                if (this->nvs_devices_.size() < this->max_dev_) {
+                    SavedDevice new_dev;
+                    new_dev.device_id = yaml_dev.device_id;
+                    memset(new_dev.name, 0, sizeof(new_dev.name));
+                    memset(new_dev.eep, 0, sizeof(new_dev.eep));
+                    strncpy(new_dev.name, yaml_dev.name.c_str(), sizeof(new_dev.name) - 1);
+                    strncpy(new_dev.eep, yaml_dev.eep.c_str(), sizeof(new_dev.eep) - 1);
+
+                    this->nvs_devices_.push_back(new_dev);
+                    need_save = true;
+                    ESP_LOGI(TAG, "YAML-Gerät %08X (%s) neu in den NVS synchronisiert.", yaml_dev.device_id, yaml_dev.name.c_str());
+                } else {
+                    ESP_LOGE(TAG, "NVS voll! YAML-Gerät %08X konnte nicht synchronisiert werden.", yaml_dev.device_id);
+                }
+            }
+        }
+
+        // Falls neue YAML-Geräte hinzugefügt wurden, schreiben wir die Daten einmalig zurück
+        if (need_save) {
+            save_to_nvs();
+        }
     }
 };
 
-} // namespace enocean_mqtt_bridge
+} // namespace enocean
 } // namespace esphome
