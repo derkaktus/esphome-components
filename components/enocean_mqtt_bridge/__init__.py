@@ -12,6 +12,7 @@ EnOceanBridge = enocean_ns.class_('EnOceanBridge', cg.Component, uart.UARTDevice
 CONF_KNOWN_DEVICES = 'known_devices'
 CONF_DEVICE_ID = 'device_id'
 CONF_EEP = 'eep'
+CONF_PARSE_ALL_DEV = 'parse_all_dev'
 
 # Schema für ein einzelnes Gerät aus der known_devices Liste
 DEVICE_SCHEMA = cv.Schema({
@@ -24,6 +25,7 @@ DEVICE_SCHEMA = cv.Schema({
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(EnOceanBridge),
     cv.Optional(CONF_KNOWN_DEVICES, default=[]): cv.ensure_list(DEVICE_SCHEMA),
+    cv.Optional(CONF_PARSE_ALL_DEV, default=False): cv.boolean,
 }).extend(cv.COMPONENT_SCHEMA).extend(uart.UART_DEVICE_SCHEMA)
 
 
@@ -33,6 +35,8 @@ async def to_code(config):
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
 
+    cg.add(var.set_parse_all_dev(config[CONF_PARSE_ALL_DEV]))
+    
     # Bekannte Geräte aus der YAML dem C++ Objekt hinzufügen
     for device in config[CONF_KNOWN_DEVICES]:
         cg.add(var.add_known_device(
