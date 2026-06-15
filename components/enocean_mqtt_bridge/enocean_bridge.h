@@ -42,19 +42,41 @@ public:
     }
 
     void setup() override {
-        ESP_LOGI(TAG, "Starte EnOcean Bridge (Max. Geräte im Flash: %u)...", this->max_dev_);
+    // 1. Seriellen Port für TCM310 initialisieren
+    this->set_rx_full_threshold(256); 
 
-        // Registrierung des Flash-Speicher-Bereichs mit dynamischer, berechneter Größe
-        // Speichergröße = sizeof(size_t) für die Anzahl + (max_dev * 52 Bytes pro Gerät)
-        size_t pref_size = sizeof(size_t) + (this->max_dev_ * sizeof(SavedDevice));
-        //this->pref_ = global_preferences->make_preference<uint8_t[]>(fnv1_hash("enocean_devices"), pref_size);
-        this->pref_ = global_preferences->make_preference(pref_size, fnv1_hash("enocean_devices")); 
-        // NVS Speicher laden
-        load_from_nvs();
+    // 2. Speichergröße berechnen
+    size_t pref_size = sizeof(SavedDevice) * this->max_dev_;
+    
+    // 3. Speicherbereich im Flash reservieren
+    this->pref_ = global_preferences->make_preference(pref_size, fnv1_hash("enocean_devices"));
 
-        // NEU: Synchronisation der YAML-Geräte in den NVS Flash
-        sync_yaml_to_nvs();
+    // Temporärer Buffer für den Ladevorgang
+    std::vector<SavedDevice> temp_buffer(this->max_dev_);
+
+    // 4. Versuchen, vorhandene Geräte aus dem Flash zu laden
+    if (this->pref_.load(temp_buffer.data())) {
+        ESP_LOGI(TAG, "NVS-Daten erfolgreich geladen.");
+        this->nvs_devices_.clear();
+        for (const auto& dev : temp_buffer) {
+            // Nur gültige Einträge (ID != 0) in die aktive Liste übernehmen
+            if (dev.device_id != 0) {
+                this->nvs_devices_.push_back(dev);
+            }
+        }
+    } else {
+        // ERSTER START: Wenn kein NVS-Eintrag existiert, leeres Array initialisieren
+        ESP_LOGW(TAG, "Keine NVS-Daten gefunden. Initialisiere leeren Speicher...");
+        this->nvs_devices_.clear();
+        
+        // Den Flash einmalig mit leeren Strukturen (ID = 0) beschreiben
+        std::fill(temp_buffer.begin(), temp_buffer.end(), SavedDevice{0, "", ""});
+        this->pref_.save(temp_buffer.data());
     }
+
+    // 5. YAML-Konfiguration mit dem NVS synchronisieren
+    this->sync_yaml_to_nvs();
+}
 
     void loop() override {
         // Hier läuft die serielle UART-Auswertung der TCM310-Telegramme
