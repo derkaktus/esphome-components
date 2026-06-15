@@ -1,232 +1,250 @@
 #pragma once
 
-#include "esphome/core/component.h"
-#include "esphome/components/uart/uart.h"
-#include "esphome/core/preferences.h"
-#include "esphome/core/log.h"
+#include "esphome.h"
+#include "eep_parser.h"
 #include <vector>
-#include <string>
-#include <cstring>
-
-namespace esphome {
-namespace enocean {
+#include <algorithm>
 
 static const char *const TAG = "enocean_bridge";
 
-// Die Struktur für den dauerhaften NVS-Speicher (Exakt 52 Bytes)
+// Struktur für persistente Speicherung im NVS-Flash
 struct SavedDevice {
     uint32_t device_id;
     char name[32];
     char eep[16];
 };
 
-// Hilfsstruktur für die temporäre Speicherung der YAML-Geräte vor dem Setup
-struct YamlDevice {
-    uint32_t device_id;
-    std::string name;
-    std::string eep;
-};
-
-// Hauptklasse der EnOcean Bridge
-class EnOceanBridge : public uart::UARTDevice, public Component {
-public:
-    // Konfigurations-Setter (aufgerufen durch die Python __init__.py)
-    void set_parse_all_dev(bool parse_all) { this->parse_all_dev_ = parse_all; }
+class EnOceanBridge : public Component, public uart::UARTDevice {
+ protected:
+    ESPPreferenceObject pref_;
+    std::vector<SavedDevice> nvs_devices_;
+    std::vector<uint8_t> rx_buffer_;
+    bool parse_all_dev_{false};
+    size_t max_dev_{40};
     
-    // NEU: Setzt die maximale Anzahl an erlaubten Geräten im Flash
-    void set_max_dev(uint32_t max_dev) { this->max_dev_ = max_dev; }
+    // Pairing-Variablen
+    bool pairing_mode_{false};
+    uint32_t pairing_start_time_{0};
+    const uint32_t pairing_timeout_{60000}; // 60 Sekunden Timeout
 
-    // NEU: Nimmt Geräte aus der yaml-Konfig entgegen und speichert sie temporär
-    void add_yaml_device(uint32_t device_id, const std::string &name, const std::string &eep) {
-        this->yaml_devices_.push_back({device_id, name, eep});
+    // Sicherung der statischen YAML-Geräte im RAM
+    std::vector<SavedDevice> yaml_devices_;
+    bool nvs_ready_{false};
+
+ public:
+    EnOceanBridge() = default;
+
+    void set_parse_all_dev(bool val) { this->parse_all_dev_ = val; }
+    void set_max_dev(size_t val) { this->max_dev_ = val; }
+
+    // Registriert Geräte, die fest im YAML eingetragen sind
+    void add_yaml_device(uint32_t device_id, const std::string& name, const std::string& eep) {
+        SavedDevice dev{};
+        dev.device_id = device_id;
+        strncpy(dev.name, name.c_str(), sizeof(dev.name) - 1);
+        strncpy(dev.eep, eep.c_str(), sizeof(dev.eep) - 1);
+        this->yaml_devices_.push_back(dev);
+    }
+
+    // Startet den Anlernmodus (kann über MQTT-Trigger oder Yaml-Button aufgerufen werden)
+    void start_pairing(bool enable) {
+        if (enable) {
+            this->pairing_mode_ = true;
+            this->pairing_start_time_ = millis();
+            ESP_LOGI(TAG, "Anlernmodus (Pairing) GESTARTET für 60 Sekunden.");
+        } else {
+            this->pairing_mode_ = false;
+            ESP_LOGI(TAG, "Anlernmodus (Pairing) BEENDET.");
+        }
     }
 
     void setup() override {
-    // 1. Seriellen Port für TCM310 initialisieren
-    this->set_rx_full_threshold(256); 
+        ESP_LOGI(TAG, "Initialisiere EnOcean Bridge...");
+        this->set_rx_full_threshold(256); 
 
-    // 2. Speichergröße berechnen
-    size_t pref_size = sizeof(SavedDevice) * this->max_dev_;
-    
-    // 3. Speicherbereich im Flash reservieren
-    this->pref_ = global_preferences->make_preference(pref_size, fnv1_hash("enocean_devices"));
+        // 1. Initialisiere die aktive Liste im RAM sofort mit den YAML-Geräten
+        this->nvs_devices_ = this->yaml_devices_;
 
-    // Temporärer Buffer für den Ladevorgang
-    std::vector<SavedDevice> temp_buffer(this->max_dev_);
+        // 2. NVS-Speicher laden mit Absicherung gegen Abstürze
+        try {
+            size_t pref_size = sizeof(SavedDevice) * this->max_dev_;
+            this->pref_ = global_preferences->make_preference(pref_size, fnv1_hash("enocean_devices"));
 
-    // 4. Versuchen, vorhandene Geräte aus dem Flash zu laden
-    if (this->pref_.load(temp_buffer.data())) {
-        ESP_LOGI(TAG, "NVS-Daten erfolgreich geladen.");
-        this->nvs_devices_.clear();
-        for (const auto& dev : temp_buffer) {
-            // Nur gültige Einträge (ID != 0) in die aktive Liste übernehmen
-            if (dev.device_id != 0) {
-                this->nvs_devices_.push_back(dev);
+            std::vector<SavedDevice> temp_buffer(this->max_dev_);
+            if (this->pref_.load(temp_buffer.data())) {
+                ESP_LOGI(TAG, "NVS-Daten erfolgreich aus Flash geladen.");
+                this->nvs_ready_ = true;
+                
+                // Füge geladene NVS-Geräte hinzu, sofern sie noch nicht im YAML definiert waren
+                for (const auto& dev : temp_buffer) {
+                    if (dev.device_id != 0) {
+                        auto it = std::find_if(this->nvs_devices_.begin(), this->nvs_devices_.end(),
+                            [&dev](const SavedDevice& d) { return d.device_id == dev.device_id; });
+                        
+                        if (it == this->nvs_devices_.end()) {
+                            this->nvs_devices_.push_back(dev);
+                            ESP_LOGI(TAG, "Gerät aus Flash geladen: 0x%08X (%s) [%s]", dev.device_id, dev.name, dev.eep);
+                        }
+                    }
+                }
+            } else {
+                ESP_LOGW(TAG, "NVS-Speicher ist leer oder uninitialisiert. Verwende YAML-Geräte.");
+                this->nvs_ready_ = true;
+                this->save_to_flash(); // Schreibt den aktuellen Zustand (YAML) initial in das NVS
             }
+        } catch (...) {
+            ESP_LOGE(TAG, "Kritischer Fehler bei der NVS-Initialisierung! Notfall-Fallback auf YAML-only.");
+            this->nvs_ready_ = false;
         }
-    } else {
-        // ERSTER START: Wenn kein NVS-Eintrag existiert, leeres Array initialisieren
-        ESP_LOGW(TAG, "Keine NVS-Daten gefunden. Initialisiere leeren Speicher...");
-        this->nvs_devices_.clear();
-        
-        // Den Flash einmalig mit leeren Strukturen (ID = 0) beschreiben
-        std::fill(temp_buffer.begin(), temp_buffer.end(), SavedDevice{0, "", ""});
-        this->pref_.save(temp_buffer.data());
-    }
 
-    // 5. YAML-Konfiguration mit dem NVS synchronisieren
-    this->sync_yaml_to_nvs();
-}
+        ESP_LOGI(TAG, "Bridge gestartet. %d Geräte aktiv registriert.", this->nvs_devices_.size());
+    }
 
     void loop() override {
-        // Hier läuft die serielle UART-Auswertung der TCM310-Telegramme
-        // und die Weiterleitung der ausgewerteten EEP-Daten an MQTT.
-    }
-
-    // Funktion zum Starten des Anlernmodus über ein MQTT/YAML-Event
-    void start_pairing() {
-        this->pairing_active_ = true;
-        ESP_LOGI(TAG, "Anlernmodus aktiviert!");
-    }
-
-    // Funktion zum Stoppen des Anlernmodus
-    void stop_pairing() {
-        this->pairing_active_ = false;
-        ESP_LOGI(TAG, "Anlernmodus beendet.");
-    }
-
-    // NEU: Speichert ein dynamisch angelerntes Gerät dauerhaft ab
-    void save_learned_device(uint32_t device_id, const std::string &name, const std::string &eep) {
-        // Prüfen, ob das Gerät bereits existiert
-        for (const auto &dev : this->nvs_devices_) {
-            if (dev.device_id == device_id) {
-                ESP_LOGI(TAG, "Gerät %08X ist bereits im NVS bekannt.", device_id);
-                return;
-            }
+        // Kontinuierlich eingehende Bytes vom UART lesen
+        while (this->available() > 0) {
+            uint8_t byte = this->read();
+            this->rx_buffer_.push_back(byte);
         }
 
-        // Prüfen, ob das konfigurierte Limit erreicht ist
-        if (this->nvs_devices_.size() >= this->max_dev_) {
-            ESP_LOGE(TAG, "Speicher voll! Maximal %u Geräte erlaubt.", this->max_dev_);
-            return;
+        if (!this->rx_buffer_.empty()) {
+            this->process_buffer();
         }
 
-        // Neues Gerät erstellen und befüllen
-        SavedDevice new_dev;
-        new_dev.device_id = device_id;
-        memset(new_dev.name, 0, sizeof(new_dev.name));
-        memset(new_dev.eep, 0, sizeof(new_dev.eep));
-        strncpy(new_dev.name, name.c_str(), sizeof(new_dev.name) - 1);
-        strncpy(new_dev.eep, eep.c_str(), sizeof(new_dev.eep) - 1);
-
-        // Im Vektor und anschließend im NVS-Flash speichern
-        this->nvs_devices_.push_back(new_dev);
-        save_to_nvs();
-        ESP_LOGI(TAG, "Gerät %08X (%s, %s) erfolgreich im NVS gelernt.", device_id, name.c_str(), eep.c_str());
+        // Timeout für Anlernmodus prüfen
+        if (this->pairing_mode_ && (millis() - this->pairing_start_time_ > this->pairing_timeout_)) {
+            ESP_LOGI(TAG, "Anlernmodus beendet (Timeout abgelaufen).");
+            this->pairing_mode_ = false;
+        }
     }
 
-protected:
-    bool parse_all_dev_{false};
-    uint32_t max_dev_{20}; // Standardwert, wird von Python überschrieben (20 für ESP8266, 40 für ESP32)
-    bool pairing_active_{false};
+ protected:
+    void save_to_flash() {
+        if (!this->nvs_ready_) return;
 
-    // Speicherverwaltung
-    ESPPreferenceObject pref_;
-    std::vector<SavedDevice> nvs_devices_;        // Aktive Liste aller bekannten Geräte (YAML + gelernt)
-    std::vector<YamlDevice> yaml_devices_;        // Temporäre Liste der beim Booten übergebenen YAML-Geräte
-
-    // Lädt alle gespeicherten Geräte aus dem Flash-Speicher
-    void load_from_nvs() {
-        size_t pref_size = sizeof(size_t) + (this->max_dev_ * sizeof(SavedDevice));
-        std::vector<uint8_t> buffer(pref_size, 0);
-
-        if (this->pref_.load(buffer.data())) {
-            size_t device_count = 0;
-            // Die ersten Bytes enthalten die Anzahl der aktuell gespeicherten Geräte
-            memcpy(&device_count, buffer.data(), sizeof(size_t));
-
-            // Sicherheitsprüfung, um Speicherüberläufe zu verhindern
-            if (device_count > this->max_dev_) {
-                device_count = this->max_dev_;
-            }
-
-            this->nvs_devices_.clear();
-            size_t offset = sizeof(size_t);
-            for (size_t i = 0; i < device_count; i++) {
-                SavedDevice dev;
-                memcpy(&dev, buffer.data() + offset, sizeof(SavedDevice));
-                this->nvs_devices_.push_back(dev);
-                offset += sizeof(SavedDevice);
-            }
-            ESP_LOGI(TAG, "%u Geräte erfolgreich aus dem NVS geladen.", device_count);
+        std::vector<SavedDevice> temp_buffer(this->max_dev_, SavedDevice{0, "", ""});
+        for (size_t i = 0; i < this->nvs_devices_.size() && i < this->max_dev_; ++i) {
+            temp_buffer[i] = this->nvs_devices_[i];
+        }
+        
+        if (this->pref_.save(temp_buffer.data())) {
+            global_preferences->sync();
+            ESP_LOGD(TAG, "Geräteliste im Flash-Speicher gesichert.");
         } else {
-            ESP_LOGI(TAG, "Keine gespeicherten Geräte im NVS gefunden (Erster Start).");
+            ESP_LOGW(TAG, "Speichern der Geräteliste im Flash-Speicher fehlgeschlagen.");
         }
     }
 
-    // Schreibt den aktuellen nvs_devices_ Vektor zurück in den NVS-Flash
-    void save_to_nvs() {
-        size_t pref_size = sizeof(size_t) + (this->max_dev_ * sizeof(SavedDevice));
-        std::vector<uint8_t> buffer(pref_size, 0);
-
-        size_t current_count = this->nvs_devices_.size();
-        // 1. Anzahl der Geräte an den Anfang schreiben
-        memcpy(buffer.data(), &current_count, sizeof(size_t));
-
-        // 2. Geräte-Strukturen dahinter anfügen
-        size_t offset = sizeof(size_t);
-        for (const auto &dev : this->nvs_devices_) {
-            memcpy(buffer.data() + offset, &dev, sizeof(SavedDevice));
-            offset += sizeof(SavedDevice);
+    void process_buffer() {
+        // Suche nach dem EnOcean ESP3 Sync-Byte (0x55)
+        while (!this->rx_buffer_.empty() && this->rx_buffer_.front() != 0x55) {
+            this->rx_buffer_.erase(this->rx_buffer_.begin());
         }
 
-        // 3. Im Flash persistieren
-        if (this->pref_.save(buffer.data())) {
-            ESP_LOGD(TAG, "NVS-Speicher erfolgreich aktualisiert (%u Geräte gesichert).", current_count);
-        } else {
-            ESP_LOGE(TAG, "Fehler beim Schreiben in den NVS-Speicher!");
-        }
+        if (this->rx_buffer_.size() < 6) return; // Header ist noch unvollständig
+
+        uint16_t data_len = (this->rx_buffer_[1] << 8) | this->rx_buffer_[2];
+        uint8_t opt_len = this->rx_buffer_[3];
+        uint8_t packet_type = this->rx_buffer_[4];
+
+        size_t total_packet_len = 6 + data_len + opt_len + 1; // 6 Header + Data + Opt + 1 CRC
+
+        if (this->rx_buffer_.size() < total_packet_len) return; // Paket noch nicht vollständig übertragen
+
+        // Vollständiges Paket aus dem Puffer kopieren und im Puffer löschen
+        std::vector<uint8_t> packet(this->rx_buffer_.begin(), this->rx_buffer_.begin() + total_packet_len);
+        this->rx_buffer_.erase(this->rx_buffer_.begin(), this->rx_buffer_.begin() + total_packet_len);
+
+        this->parse_esp3_packet(packet);
     }
 
-    // NEU: Abgleich der YAML-Geräte mit dem NVS-Speicher beim Booten
-    void sync_yaml_to_nvs() {
-        bool need_save = false;
+    void parse_esp3_packet(const std::vector<uint8_t>& packet) {
+        uint16_t data_len = (packet[1] << 8) | packet[2];
+        uint8_t opt_len = packet[3];
+        uint8_t packet_type = packet[4];
 
-        for (const auto &yaml_dev : this->yaml_devices_) {
-            bool found = false;
-            // Prüfen, ob das YAML-Gerät bereits im NVS ist
-            for (const auto &nvs_dev : this->nvs_devices_) {
-                if (nvs_dev.device_id == yaml_dev.device_id) {
-                    found = true;
-                    break;
-                }
-            }
+        // Wir interessieren uns nur für Radio Erp1 Telegramme (Typ 0x01)
+        if (packet_type != 0x01) return;
 
-            // Wenn das YAML-Gerät noch nicht im NVS existiert, fügen wir es hinzu
-            if (!found) {
-                if (this->nvs_devices_.size() < this->max_dev_) {
-                    SavedDevice new_dev;
-                    new_dev.device_id = yaml_dev.device_id;
-                    memset(new_dev.name, 0, sizeof(new_dev.name));
-                    memset(new_dev.eep, 0, sizeof(new_dev.eep));
-                    strncpy(new_dev.name, yaml_dev.name.c_str(), sizeof(new_dev.name) - 1);
-                    strncpy(new_dev.eep, yaml_dev.eep.c_str(), sizeof(new_dev.eep) - 1);
+        // payload beginnt bei Index 6
+        size_t payload_offset = 6;
+        if (data_len < 6) return; // Zu kurzes Radio-Telegramm
 
-                    this->nvs_devices_.push_back(new_dev);
-                    need_save = true;
-                    ESP_LOGI(TAG, "YAML-Gerät %08X (%s) neu in den NVS synchronisiert.", yaml_dev.device_id, yaml_dev.name.c_str());
-                } else {
-                    ESP_LOGE(TAG, "NVS voll! YAML-Gerät %08X konnte nicht synchronisiert werden.", yaml_dev.device_id);
+        uint8_t rorg = packet[payload_offset];
+        
+        // Sender-ID liegt am Ende der Nutzdaten (vor den optionalen Daten)
+        // Bei ERP1 ist die Sender-ID immer 4 Bytes vor dem Ende der Nutzdaten
+        size_t id_offset = payload_offset + data_len - 5; 
+        uint32_t sender_id = ((uint32_t)packet[id_offset] << 24) |
+                             ((uint32_t)packet[id_offset + 1] << 16) |
+                             ((uint32_t)packet[id_offset + 2] << 8) |
+                             (uint32_t)packet[id_offset + 3];
+
+        ESP_LOGD(TAG, "Paket empfangen: RORG=0x%02X, Sender-ID=0x%08X", rorg, sender_id);
+
+        // Überprüfen, ob das Gerät registriert ist
+        auto it = std::find_if(this->nvs_devices_.begin(), this->nvs_devices_.end(),
+            [sender_id](const SavedDevice& dev) { return dev.device_id == sender_id; });
+
+        bool is_registered = (it != this->nvs_devices_.end());
+
+        // 1. FALLS PAIRING AKTIV IST: Neues Gerät anlernen (A5-06-10-00 Teach-In Telegramm)
+        if (this->pairing_mode_ && !is_registered) {
+            // Ein Teach-In bei 4BS (RORG 0xA5) hat oft das 3. Byte (LRN-Bit) auf 0 gesetzt
+            // Für EEP A5-06-10-00 prüfen wir das Vorhandensein
+            if (rorg == 0xA5) {
+                uint8_t db0 = packet[payload_offset + data_len - 6]; // DB0 Byte
+                bool lrn_bit = !(db0 & 0x08); // LRN-Bit ist invertiert (0 = Teach-in, 1 = Data)
+
+                if (lrn_bit) {
+                    ESP_LOGI(TAG, "Teach-In Telegramm von neuem Gerät empfangen! ID: 0x%08X", sender_id);
+                    
+                    if (this->nvs_devices_.size() < this->max_dev_) {
+                        SavedDevice new_dev{};
+                        new_dev.device_id = sender_id;
+                        
+                        // Generiere einen sprechenden Namen
+                        snprintf(new_dev.name, sizeof(new_dev.name), "learned_0x%08X", sender_id);
+                        
+                        // Für das angefragte Gerät setzen wir das EEP auf A5-06-10-00
+                        strncpy(new_dev.eep, "A5-06-10-00", sizeof(new_dev.eep) - 1);
+
+                        this->nvs_devices_.push_back(new_dev);
+                        this->save_to_flash(); // Sofort im NVS-Flash sichern
+
+                        ESP_LOGI(TAG, "Gerät erfolgreich gelernt und gespeichert: %s", new_dev.name);
+                        
+                        // Pairing-Modus nach erfolgreichem Anlernen beenden
+                        this->pairing_mode_ = false;
+                        return;
+                    } else {
+                        ESP_LOGE(TAG, "Geräteliste voll! Maximal %d Geräte erlaubt.", this->max_dev_);
+                    }
                 }
             }
         }
 
-        // Falls neue YAML-Geräte hinzugefügt wurden, schreiben wir die Daten einmalig zurück
-        if (need_save) {
-            save_to_nvs();
+        // 2. TELEGRAMM VERARBEITEN: Wenn das Gerät registriert ist oder "parse_all" aktiv ist
+        if (is_registered || this->parse_all_dev_) {
+            std::string device_name = is_registered ? it->name : "Unknown";
+            std::string eep = is_registered ? it->eep : "";
+
+            // Falls Gerät unbekannt, versuchen wir, anhand des RORG ein Standard-EEP zu raten
+            if (eep.empty()) {
+                if (rorg == 0xF6) eep = "F6-10-00";
+                else if (rorg == 0xA5) eep = "A5-02-05"; // Default 4BS
+            }
+
+            ESP_LOGI(TAG, "Verarbeite Telegramm für Gerät: %s (ID: 0x%08X) via EEP: %s", 
+                     device_name.c_str(), sender_id, eep.c_str());
+
+            // Nutzdaten extrahieren (ohne RORG, ID und Status)
+            size_t data_bytes_len = data_len - 6; // payload minus RORG(1), Sender-ID(4), Status(1)
+            std::vector<uint8_t> data_bytes(packet.begin() + payload_offset + 1, 
+                                            packet.begin() + payload_offset + 1 + data_bytes_len);
+
+            // Paket an die `eep_parser.h` übergeben
+            parse_and_publish(eep, data_bytes, sender_id, device_name);
         }
     }
 };
-
-} // namespace enocean
-} // namespace esphome
