@@ -47,8 +47,8 @@ public:
         // Registrierung des Flash-Speicher-Bereichs mit dynamischer, berechneter Größe
         // Speichergröße = sizeof(size_t) für die Anzahl + (max_dev * 52 Bytes pro Gerät)
         size_t pref_size = sizeof(size_t) + (this->max_dev_ * sizeof(SavedDevice));
-        this->pref_ = global_preferences->make_preference<uint8_t[]>(fnv1_hash("enocean_devices"), pref_size);
-
+        //this->pref_ = global_preferences->make_preference<uint8_t[]>(fnv1_hash("enocean_devices"), pref_size);
+        this->pref_ = global_preferences->make_preference(pref_size, fnv1_hash("enocean_devices")); 
         // NVS Speicher laden
         load_from_nvs();
 
