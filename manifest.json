@@ -1,0 +1,7 @@
+{
+  "name": "enocean_mqtt_bridge",
+  "version": "1.0.0",
+  "description": "Eine EnOcean MQTT Bruecke für esphome",
+  "dependencies": ["esp32"],
+  "homeassistant": "2023.6.0"
+}
